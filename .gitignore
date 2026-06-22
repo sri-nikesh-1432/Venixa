@@ -1,0 +1,25 @@
+# Node
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Audio files
+*.mp3
+*.wav
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vscode
+.vscode/
+
+# Logs
+*.log
+#env
+.env file
