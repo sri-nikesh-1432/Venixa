@@ -221,7 +221,8 @@ async def generate_tts(text: str, language: str):
 
 
 def audio_url(filename: str):
-    return f"{BASE_URL}/static/{filename}"
+    # Return relative path; frontend will prepend its own base URL
+    return f"/static/{filename}"
 
 
 # =====================================================

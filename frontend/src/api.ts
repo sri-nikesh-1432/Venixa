@@ -39,7 +39,10 @@ export async function sendTextChat(
   history: Message[]
 ): Promise<ChatResponse> {
   const res = await api.post<ChatResponse>("/chat", { text, history });
-  return res.data;
+  return {
+    ...res.data,
+    audio_url: `${baseURL}${res.data.audio_url}`,
+  };
 }
 
 export async function sendVoiceChat(
@@ -52,5 +55,8 @@ export async function sendVoiceChat(
   formData.append("history", JSON.stringify(history));
 
   const res = await api.post<VoiceResponse>("/voice", formData);
-  return res.data;
+  return {
+    ...res.data,
+    audio_url: `${baseURL}${res.data.audio_url}`,
+  };
 }
