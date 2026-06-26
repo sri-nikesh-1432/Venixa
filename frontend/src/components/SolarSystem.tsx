@@ -28,15 +28,22 @@ function NeuralCore({
   listening: boolean;
 }) {
   const pointsRef = useRef<THREE.Points>(null);
+  const coreRef = useRef<THREE.Mesh>(null);
 
   const particles = useMemo(() => {
     const count = 800;
     const positions = new Float32Array(count * 3);
 
+    let seed = 1337;
+    const rand = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+
     for (let i = 0; i < count; i++) {
-      const radius = 1.5 + Math.random() * 2.2;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
+      const radius = 1.5 + rand() * 2.2;
+      const theta = rand() * Math.PI * 2;
+      const phi = Math.acos(2 * rand() - 1);
 
       positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
       positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
@@ -53,12 +60,11 @@ function NeuralCore({
   }, [particles]);
 
   useFrame(({ clock }) => {
-    if (!pointsRef.current) return;
+    if (!pointsRef.current || !coreRef.current) return;
 
     const speed = speaking ? 0.14 : listening ? 0.1 : 0.04;
     pointsRef.current.rotation.y = clock.elapsedTime * speed;
-    pointsRef.current.rotation.x =
-      Math.sin(clock.elapsedTime * 0.3) * 0.08;
+    pointsRef.current.rotation.x = Math.sin(clock.elapsedTime * 0.3) * 0.08;
 
     const pulse = speaking
       ? 1.55
@@ -67,6 +73,7 @@ function NeuralCore({
         : 1 + Math.min(volume / 200, 0.3);
 
     pointsRef.current.scale.set(pulse, pulse, pulse);
+    coreRef.current.scale.set(pulse, pulse, pulse);
   });
 
   const glow = speaking ? "#ffffff" : listening ? "#e8ff4a" : "#ccff00";
@@ -82,7 +89,7 @@ function NeuralCore({
           sizeAttenuation
         />
       </points>
-      <mesh>
+      <mesh ref={coreRef}>
         <sphereGeometry args={[0.18, 24, 24]} />
         <meshBasicMaterial color="#e8ff4a" />
       </mesh>
@@ -167,6 +174,8 @@ export default function SolarSystem() {
   const [loading, setLoading] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
+  const [voiceState, setVoiceState] = useState<"idle" | "recording" | "processing">("idle");
+
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
   const [showInput, setShowInput] = useState(true);
@@ -175,11 +184,12 @@ export default function SolarSystem() {
   const chunksRef = useRef<Blob[]>([]);
   const mimeTypeRef = useRef("audio/webm");
   const inputRef = useRef<HTMLInputElement>(null);
-  const spaceHeldRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
+  const silenceCounterRef = useRef(0);
+  const coreClickRef = useRef<HTMLDivElement>(null);
 
   const lastAssistant = messages.filter((m) => m.role === "assistant").at(-1);
-  const activeVisualizer = speaking || listening || loading;
+  const activeVisualizer = speaking || listening || loading || voiceState === "recording";
 
   useEffect(() => {
     checkHealth().then(setConnected);
@@ -228,6 +238,8 @@ export default function SolarSystem() {
 
   const processResponse = useCallback(
     async (userText: string, reply: string, audioUrl: string) => {
+      setVoiceState("processing");
+
       setMessages((prev) => [
         ...prev,
         { role: "user", content: userText },
@@ -235,6 +247,7 @@ export default function SolarSystem() {
       ]);
       setStatus("Speaking...");
       setSpeaking(true);
+      setVoiceState("idle");
       try {
         await playAudio(audioUrl);
       } catch {
@@ -277,6 +290,8 @@ export default function SolarSystem() {
 
   const sendRecordedAudio = useCallback(
     async (blob: Blob) => {
+      setVoiceState("processing");
+
       setError("");
       setLoading(true);
       setStatus("Understanding...");
@@ -285,6 +300,7 @@ export default function SolarSystem() {
 
       try {
         const res = await sendVoiceChat(blob, messages, `voice.${ext}`);
+        setText(res.text);
         await processResponse(res.text, res.reply, res.audio_url);
       } catch (err) {
         console.error(err);
@@ -302,7 +318,7 @@ export default function SolarSystem() {
   );
 
   const startRecording = useCallback(async () => {
-    if (loading || listening) return;
+    if (loading || listening || voiceState === "recording") return;
 
     try {
       const stream =
@@ -336,12 +352,13 @@ export default function SolarSystem() {
           await sendRecordedAudio(blob);
         } else {
           setStatus("Ready");
-          setError("Too short. Hold Space or mic button while speaking.");
+          setError("Too short. Please speak clearly.");
         }
       };
 
       recorder.start(200);
       setListening(true);
+      setVoiceState("recording");
       setStatus("Listening...");
       setError("");
     } catch (err) {
@@ -357,36 +374,36 @@ export default function SolarSystem() {
     }
   }, []);
 
+  // Auto-stop after 5 seconds of silence
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || e.repeat) return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+    const SILENCE_THRESHOLD = 6;
+    const SILENCE_FRAMES = 30; // ~5 seconds at 60fps
 
-      e.preventDefault();
-      if (!spaceHeldRef.current) {
-        spaceHeldRef.current = true;
-        startRecording();
-      }
-    };
+    if (!streamRef.current || voiceState !== "recording") {
+      silenceCounterRef.current = 0;
+      return;
+    }
 
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code !== "Space") return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (volume < SILENCE_THRESHOLD) {
+      silenceCounterRef.current += 1;
+    } else {
+      silenceCounterRef.current = 0;
+    }
 
-      e.preventDefault();
-      spaceHeldRef.current = false;
+    if (silenceCounterRef.current >= SILENCE_FRAMES) {
+      silenceCounterRef.current = 0;
       stopRecording();
-    };
+    }
+  }, [volume, voiceState, stopRecording]);
 
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-  }, [startRecording, stopRecording]);
+  // Click green orb to toggle recording
+  const handleCoreClick = useCallback(() => {
+    if (voiceState === "recording") {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [voiceState, startRecording, stopRecording]);
 
   const focusSearch = () => {
     setShowInput(true);
@@ -433,6 +450,25 @@ export default function SolarSystem() {
         <div className="hud-ring hud-ring--outer" />
         <div className="hud-ring hud-ring--inner" />
         <div className="hud-ring hud-ring--ticks" />
+
+        {/* Invisible clickable overlay over the green orb */}
+        <div
+          ref={coreClickRef}
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            width: "120px",
+            height: "120px",
+            borderRadius: "50%",
+            cursor: "pointer",
+            pointerEvents: "auto",
+            zIndex: 5,
+          }}
+          onClick={handleCoreClick}
+          title="Click to talk to Venixa"
+        />
       </div>
 
       <div className="hud-overlay">
@@ -518,24 +554,6 @@ export default function SolarSystem() {
             >
               Search
             </button>
-            <button
-              type="button"
-              className="hud-cmd-btn"
-              disabled={loading}
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onMouseLeave={stopRecording}
-              onTouchStart={(e) => {
-                e.preventDefault();
-                startRecording();
-              }}
-              onTouchEnd={(e) => {
-                e.preventDefault();
-                stopRecording();
-              }}
-            >
-              Voice
-            </button>
           </div>
 
           {showInput && (
@@ -546,22 +564,87 @@ export default function SolarSystem() {
                 handleTextSubmit();
               }}
             >
-              <input
-                ref={inputRef}
-                type="text"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Type your question and press Enter..."
-                disabled={loading}
-                className="hud-search-input"
-                autoComplete="off"
-              />
+              <div className="hud-inputWrap">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Ask Venixa..."
+                  disabled={loading}
+                  className="hud-search-input"
+                  autoComplete="off"
+                />
+
+                <button
+                  type="button"
+                  className={`hud-micBtn ${
+                    voiceState === "recording"
+                      ? "hud-micBtn--recording"
+                      : voiceState === "processing"
+                        ? "hud-micBtn--processing"
+                        : ""
+                  }`}
+                  aria-label="Voice input"
+                  disabled={loading || voiceState === "processing"}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    startRecording();
+                  }}
+                  onMouseUp={(e) => {
+                    e.preventDefault();
+                    stopRecording();
+                  }}
+                  onMouseLeave={(e) => {
+                    e.preventDefault();
+                    stopRecording();
+                  }}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    startRecording();
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    stopRecording();
+                  }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    startRecording();
+                  }}
+                >
+                  <span className="hud-micIcon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path
+                        d="M12 14.5c1.93 0 3.5-1.57 3.5-3.5V6.5c0-1.93-1.57-3.5-3.5-3.5S8.5 4.57 8.5 6.5V11c0 1.93 1.57 3.5 3.5 3.5Z"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M5.5 11.2c0 3.6 2.8 6.3 6.5 6.3s6.5-2.7 6.5-6.3"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                      />
+                      <path
+                        d="M12 17.5V21"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </span>
+                  <span className="hud-micRing" aria-hidden="true" />
+                  <span className="hud-micSpinner" aria-hidden="true" />
+                </button>
+              </div>
+
               <button
                 type="submit"
-                className="hud-search-send"
+                className="hud-search-send hud-search-send--primary"
                 disabled={loading || !text.trim()}
               >
-                Send
+                ➤
               </button>
             </form>
           )}
@@ -573,7 +656,7 @@ export default function SolarSystem() {
           </div>
 
           <p className="hud-start-label">
-            {listening ? "RELEASE SPACE TO SEND" : "PRESS SPACE TO START"}
+            {listening ? "CLICK ORB AGAIN TO STOP" : "CLICK GREEN ORB TO START"}
           </p>
         </div>
       </div>
